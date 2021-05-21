@@ -4,6 +4,7 @@ proto.SUB_PACK_CONFIG_FILE_NAME = 'subpackages.plist';
 proto.FOLDER_SEPERATOR = '_';
 proto.SIGN_FILE_NAME = '.sign';
 proto.SIGN_FILE_CONTENT_TEMPLATE = "Don't modify me! {0}";
+proto.ALWAYS_READ_CONFIG = true;//子包信息是否总是从配置文件中读取，设置为true，会加重文件读写的负担，但是更加安全
 
 proto._launchSubpackageMem = {};
 
@@ -29,6 +30,11 @@ DownloadTask.prototype.progress = function (current, total) {
 DownloadTask.prototype.complete = function (result, error) {
     (!this.isStop) && this._completeCB && this._completeCB(result, error);
     this.task = null;
+    this._isFinish = true;
+};
+
+DownloadTask.prototype.isFinish = function () {
+    return this.isStop || this._isFinish;
 };
 
 /**
@@ -37,7 +43,6 @@ DownloadTask.prototype.complete = function (result, error) {
 DownloadTask.prototype.stop = function () {
     this.isStop = true;
     if (this.downloader && this.task) {
-        this.downloader.abort(this.task);
         this.task = null;
         this.downloader = null;
     }
@@ -70,7 +75,7 @@ proto._getRealPath = function (sign, md5) {
 //获取子包配置
 proto._getSubPackConfig = function (name, type) {
     var realName = this._getRealName(name, type);
-    if (!this.subpackages_config) {
+    if (!this.subpackages_config || this.ALWAYS_READ_CONFIG) {
         var path = jsb.fileUtils.getWritablePath();
         var resPath = path.concat(this.RES_PATH);
         var configPath = resPath.concat(this.SUB_PACK_CONFIG_FILE_NAME);
@@ -196,42 +201,88 @@ proto._downloadABigFile = function (url, targetPath, identifier, progress, compl
         });
         this._downloader._pcallback = {};
         this._downloader._ccallback = {};
-    }
-    if (this._downloader && url && targetPath) {
-        this._downloader._pcallback[identifier] = progress;
-        this._downloader._ccallback[identifier] = complete;
-        this._downloader.setOnFileTaskSuccess(function (task) {
+
+        this._onFileTaskSuccessCB = function (task) {
             var complete = _this._downloader._ccallback[task.identifier];
             complete && complete(true);
             delete _this._downloader._ccallback[task.identifier];
             delete _this._downloader._pcallback[task.identifier];
-        });
-        this._downloader.setOnTaskProgress(function (task, bytesReceived, totalBytesReceived, totalBytesExpected) {
+        };
+        this._onTaskProgressCB = function (task, bytesReceived, totalBytesReceived, totalBytesExpected) {
             var progress = _this._downloader._pcallback[task.identifier];
             progress && progress(totalBytesReceived, totalBytesExpected);
-        });
-        this._downloader.setOnTaskError(function (task, errorCode, errorCodeInternal, errorStr) {
+        };
+        this._onTaskErrorCB = function (task, errorCode, errorCodeInternal, errorStr) {
             var complete = _this._downloader._ccallback[task.identifier];
             complete && complete(false, errorStr);
             delete _this._downloader._ccallback[task.identifier];
             delete _this._downloader._pcallback[task.identifier];
-        });
+        };
+    }
+    if (this._downloader && url && targetPath) {
+        this._downloader._pcallback[identifier] = progress;
+        this._downloader._ccallback[identifier] = complete;
+        this._downloader.setOnFileTaskSuccess(this._onFileTaskSuccessCB);
+        this._downloader.setOnTaskProgress(this._onTaskProgressCB);
+        this._downloader.setOnTaskError(this._onTaskErrorCB);
         return this._downloader.createDownloadFileTask(url, targetPath, identifier);//创建下载任务
     }
 }
 
+proto._createZipUtilHelper = function () {
+    if (jsb && !this._zipUtilHelper) {
+        this._zipUtilHelper = jsb.MZipUtils.getInstance();
+
+        this._zipUtilHelper._calMD5Callback = {};
+        this._zipUtilHelper._unZipProgressCallback = {};
+        this._zipUtilHelper._unZipCompleteCallback = {};
+
+        this._zipUtilHelper._calMD5CB = function (key, result, message) {
+            var complete = this._calMD5Callback[key];
+            complete && complete(result, message);
+            delete this._calMD5Callback[key];
+        }
+
+        this._zipUtilHelper._unZipProgressCB = function (key, current, total) {
+            var progress = this._unZipProgressCallback[key];
+            progress && progress(current, total);
+        }
+
+        this._zipUtilHelper._unZipCompleteCB = function (key, result, message) {
+            var complete = this._unZipCompleteCallback[key];
+            complete && complete(result, message);
+            delete this._unZipProgressCallback[key];
+            delete this._unZipCompleteCallback[key];
+        }
+
+        this._zipUtilHelper.setCalFileMD5Callback(this._zipUtilHelper._calMD5CB);
+        this._zipUtilHelper.setUnZipFileProgressCallback(this._zipUtilHelper._unZipProgressCB);
+        this._zipUtilHelper.setUnZipFileCompleteCallback(this._zipUtilHelper._unZipCompleteCB);
+
+        this._zipUtilHelper.calFileMD5Outline = function (url, callback) {
+            this._calMD5Callback[url] = callback;
+            this.calFileMD5(url);
+        }
+
+        this._zipUtilHelper.unZipFileOutline = function (srcDir, targetDir, fileName, progress, complete) {
+            this._unZipProgressCallback[srcDir + ',' + fileName] = progress;
+            this._unZipCompleteCallback[srcDir + ',' + fileName] = complete;
+            this.unZipFile(srcDir, targetDir, fileName);
+        }
+    }
+    return this._zipUtilHelper;
+}
+
 //获取文件的MD5值
 proto._getFileMD5 = function (url, callback) {
-    jsb.fileUtils.calFileMD5(url, callback);
+    var zipUtilHelper = this._createZipUtilHelper();
+    zipUtilHelper.calFileMD5Outline(url, callback);
 }
 
 //解压一个子包压缩包
 proto._unzipAPackFile = function (srcDir, targetDir, fileName, progress, complete) {
-    jsb.fileUtils.unZipFile(srcDir, targetDir, fileName, function (current, total) {
-        progress && progress(current, total);
-    }, function (result, message) {
-        complete && complete(result, message);
-    });
+    var zipUtilHelper = this._createZipUtilHelper();
+    zipUtilHelper.unZipFileOutline(srcDir, targetDir, fileName, progress, complete);
 }
 
 //截取文件名
@@ -256,7 +307,7 @@ proto._clearAOldSubpackageFolder = function (name, type) {
  * @param {string} md5 子包md5值
  * @returns {boolean} 子包需要更新返回true
  */
-proto.checkASubpackage = function (name, type, sign, md5){
+proto.checkASubpackage = function (name, type, sign, md5) {
     var vConfig = [['jsb', jsb], ['name', name], ['type', type], ['sign', sign], ['md5', md5]];
     for (var i = 0, r; i < vConfig.length; i++) {
         r = this._validParams(vConfig[i][0], vConfig[i][1]);
@@ -275,7 +326,7 @@ proto.checkASubpackage = function (name, type, sign, md5){
  * @param {[{name:string, type:SUBPACKAGE_TYPE, sign:string, md5:string, url:string}]} infos 子包信息数组
  * @returns {Array<boolean>} 子包是否需要更新的列表
  */
-proto.checkSomeSubpackages = function (infos){
+proto.checkSomeSubpackages = function (infos) {
     if (!infos instanceof Array) {
         cc.warn("Subpackages infos mush be a Array.");
         return;
@@ -296,7 +347,7 @@ proto.checkSomeSubpackages = function (infos){
             }
         }
     }
-    return infos.map(function(e){return this._checkASubpackage(e.name, e.type, e.sign, e.md5)}, this);
+    return infos.map(function (e) { return this._checkASubpackage(e.name, e.type, e.sign, e.md5) }, this);
 }
 
 /**
@@ -326,6 +377,7 @@ proto.downloadASubpackage = function (name, type, sign, md5, url, progress, comp
     //校验本地包配置
     var task = this._downloadASubpackage(name, type, sign, md5, url, keepZip, downloadTask.progress, downloadTask.complete);
     downloadTask.task = task;
+    downloadTask.downloader = this._downloader;
     return downloadTask;
 }
 
@@ -361,6 +413,7 @@ proto.downloadSomeSubpackages = function (infos, progress, complete, keepZip) {
     var index = 0, results = [], errors = [], fInfo = infos[index];
     var dAs = this._downloadASubpackage.bind(this);
     var downloadTask = new this.DownloadTask(null, this._downloader, progress, complete);
+    var _this = this;
     cc.log("Start download some subpackages ".concat(JSON.stringify(infos)).concat("."));
     var recursiveDownload = function (info) {
         if (downloadTask.isStop) return;
@@ -373,6 +426,7 @@ proto.downloadSomeSubpackages = function (infos, progress, complete, keepZip) {
             if (index < infos.length) {
                 info = infos[index];
                 downloadTask.task = recursiveDownload(info);
+                downloadTask.downloader = _this._downloader;
             } else {
                 cc.log("Download some subpackages complete and the result is ".concat(JSON.stringify(results).concat(results.every(function (e) { return e }) ? ". All subpackages download success." : "Some subpackages download failed.")));
                 downloadTask.progress && downloadTask.progress(1, 1);
@@ -382,6 +436,7 @@ proto.downloadSomeSubpackages = function (infos, progress, complete, keepZip) {
     };
 
     downloadTask.task = recursiveDownload(fInfo);
+    downloadTask.downloader = this._downloader;
 
     return downloadTask;
 }
@@ -511,7 +566,7 @@ proto.shutSomeSubpackages = function (infos, callback) {
                 info = infos[index];
                 recursiveShut(info);
             } else {
-                cc.log("Launch some subpackages complete and the result is ".concat(JSON.stringify(errors).concat(errors.every(function (e) { return !e }) ? "All subpackages launch success." : "Some subpackages launch failed.")));
+                cc.log("Shut some subpackages complete and the result is ".concat(JSON.stringify(errors).concat(errors.every(function (e) { return !e }) ? "All subpackages shut success." : "Some subpackages shut failed.")));
                 callback && callback(errors);
             }
         });
@@ -579,13 +634,13 @@ proto._shutASubpackage = function (name, type, callback) {
         jsb.fileUtils.setSearchPaths(searchPaths);
         if (type == this.SUBPACKAGE_TYPE.LOGIC_SUBPACKAGE) {
             this._unLoadSubpackageSuper(subpackageContentPath, function (err) {
-                var errInfo = "UnLaunching subpackages ".concat(name).concat(" of type ").concat(type).concat(err ? " success." : " failed.");
+                var errInfo = "UnLaunching subpackages ".concat(name).concat(" of type ").concat(type).concat(!err ? " success." : " failed.");
                 cc.log(errInfo);
                 err && cc.error(JSON.stringify(err));
-                callback && callback(errInfo);
+                callback && callback(err ? errInfo : null);
                 //清理子包启动记录
                 delete this._launchSubpackageMem[this._getRealName(name, type)];
-            });
+            }.bind(this));
         } else {
             //释放资源
             callback && callback();
@@ -604,9 +659,10 @@ proto._launchASubpackage = function (name, type, callback) {
     cc.log("Valid local subpackage %s config of type %s complete.", name, type);
     //校验子包启记录，一个子包只能启动一次
     if (this._launchSubpackageMem[this._getRealName(name, type)]) {
-        var errInfo = "The subpackages ".concat(name).concat(" of type ").concat(type).concat(" has be launched already. You can only launch the subpackage once.");
+        var isLoading = this._launchSubpackageMem[this._getRealName(name, type)] == 'loading';
+        var errInfo = "The subpackages ".concat(name).concat(" of type ").concat(type).concat(isLoading ? " is loading. Wait for a moment." : " has be launched already. You can only launch the subpackage once.");
         cc.log(errInfo);
-        callback && callback(null, this._launchSubpackageMem[this._getRealName(name, type)]);
+        callback && callback(isLoading ? errInfo : null, isLoading ? null : this._launchSubpackageMem[this._getRealName(name, type)]);
         return;
     }
     //添加子包启动记录
@@ -649,7 +705,7 @@ proto._launchASubpackage = function (name, type, callback) {
     }
 }
 
-proto._checkASubpackage = function (name, type, sign, md5){
+proto._checkASubpackage = function (name, type, sign, md5) {
     this._validLocalSubpackage(name, type);
     cc.log("Valid local subpackage %s config of type %s complete.", name, type);
     var needUpdate = this._isLocalSubpackageNeedUpdate(name, type, sign, md5);

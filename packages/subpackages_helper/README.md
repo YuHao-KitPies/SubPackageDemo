@@ -17,6 +17,9 @@
 2. 要想实现子包的分级依赖，需要在子包的加载顺序上进一步封装
 
 3. 需要在引擎中引入以下自定制代码 
+
+4. 如使用Cocos Creator 2.4及以上版本，请勿使用此包内容，Asset Bundle是更好的选择
+
 * 在AssetLibray中添加以下两个扩展方法
 ``` js
 var AssetLibrary = {
@@ -174,11 +177,13 @@ proto.remove = function(path, uuid, type) {
 ``` js
 js.unregisterClassByPro = function(prop) {
     for (var i = 0; i < prop.length; i++) {
+        console.log(prop[i]);
         var p = prop[i];
         var classId = p[0];
         classId && delete _idToClass[classId];
         var classname = p[1];
         classname && delete _nameToClass[classname];
+        classId && delete _idToClass[classname];
     }
 };
 
@@ -205,11 +210,11 @@ NS_CC_BEGIN
 /**
  * 过程回调函数
  */
-typedef std::function<void(const long current, const long total)> ProgressCallback;
+typedef std::function<void(const std::string key, const long current, const long total)> ProgressCallback;
 /**
  * 完成回调函数
  */
-typedef std::function<void(const bool result, const std::string message)> FinishCallback;
+typedef std::function<void(const std::string key, const bool result, const std::string message)> FinishCallback;
 
 class CC_DLL MZipUtils
 {
@@ -231,22 +236,37 @@ public:
     virtual ~MZipUtils();
     
     /**
+     * 设置计算文件md5值回调
+     * @param complete 完成回调函数
+     */
+    void setCalFileMD5Callback(const FinishCallback& complete);
+    
+    /**
+     * 设置解压回调
+     * @param complete 完成回调函数
+     */
+    void setUnZipFileCompleteCallback(const FinishCallback& complete);
+    
+    /**
+     * 设置解压进度回调
+     * @param progress 进度回调函数
+     */
+    void setUnZipFileProgressCallback(const ProgressCallback& progress);
+    
+    /**
      * 解压文件到指定目录
      * 压缩包内的内容会直接解压到目标解压地址中
      * @param srcDir 源文件地址
      * @param tarfullpath 目标解压地址
      * @param zipName 压缩文件名
-     * @param progress 过程回调函数
-     * @param complete 完成回调函数
      */
-    void unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback& progress, const FinishCallback& complete);
+    void unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName);
     
     /**
      * 计算文件md5值
      * @param filePath 文件地址
-     * @param complete 完成回调函数
      */
-    void calFileMD5(const std::string &filePath, const FinishCallback& complete);
+    void calFileMD5(const std::string &filePath);
     
 protected:
     /**
@@ -262,7 +282,7 @@ protected:
      */
     ThreadPool* workThread = nullptr;
     
-    void unZipFileSync(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback& progress, const FinishCallback& complete);
+    void unZipFileSync(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName);
 
     /**
      * 在Cocos线程中执行
@@ -274,7 +294,21 @@ protected:
      * MD5解析器
      */
     MD5* md5c = nullptr;
-
+    
+    /**
+     * MD5解析器完成回调
+     */
+    FinishCallback calFileMD5Callback;
+    
+    /**
+     * 解压完成回调
+     */
+    FinishCallback unZipFileCompleteCallback;
+    
+    /**
+     * 解压过程回调
+     */
+    ProgressCallback unZipFileProgressCallback;
 };
 
 // end of support group
@@ -330,40 +364,61 @@ MZipUtils::~MZipUtils()
     CC_SAFE_DELETE(this->md5c);
 }
 
-void MZipUtils::unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback &progress, const FinishCallback &complete)
+void MZipUtils::setCalFileMD5Callback(const FinishCallback& complete)
 {
-    this->workThread->pushTask([this, srcDir, tarfullpath, zipName, progress, complete](int tid){
-        this->unZipFileSync(srcDir, tarfullpath, zipName, progress, complete);
+    this->calFileMD5Callback = complete;
+}
+
+void MZipUtils::setUnZipFileCompleteCallback(const FinishCallback& complete)
+{
+    this->unZipFileCompleteCallback = complete;
+}
+
+void MZipUtils::setUnZipFileProgressCallback(const ProgressCallback& progress)
+{
+    this->unZipFileProgressCallback = progress;
+}
+
+void MZipUtils::unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName)
+{
+    this->workThread->pushTask([this, srcDir, tarfullpath, zipName](int tid){
+        this->unZipFileSync(srcDir, tarfullpath, zipName);
     }, ThreadPool::TaskType::IO);
 }
 
-void MZipUtils::calFileMD5(const std::string &filePath, const FinishCallback& complete)
+void MZipUtils::calFileMD5(const std::string &filePath)
 {
-    this->workThread->pushTask([this, filePath, complete](int tid){
+    this->workThread->pushTask([this, filePath](int tid){
         CCLOG("Cal md5 for %s.", filePath.c_str());
+        bool result = false;
+        std::string message;
         if(FileUtils::getInstance()->isFileExist(filePath)){
             ifstream fs(filePath);
             if(fs){
                 this->md5c->update(fs);
                 std::string rmd5 = this->md5c->toString();
                 this->md5c->reset();
-                this->runInCallerThread([complete, rmd5](){
-                    complete(true, rmd5);
-                });
+                result = true;
+                message = rmd5;
             } else {
-                this->runInCallerThread([complete](){
-                    complete(false, "File can not open.");
-                });
+                result = false;
+                message = "File can not open.";
             }
         } else {
-            this->runInCallerThread([complete](){
-                complete(false, "File not exist.");
-            });
+            result = false;
+            message = "File not exist.";
         }
+
+        this->runInCallerThread([this, filePath, result, message](){
+            if(this->calFileMD5Callback)
+            {
+                this->calFileMD5Callback(filePath, result, message);
+            }
+        });
     }, ThreadPool::TaskType::IO);
 }
 
-void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback& progress, const FinishCallback& complete)
+void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName)
 {
     std::string realSrcDir = srcDir, realTarfullpath = tarfullpath, realName = zipName, suffix = ".zip";
     unzFile zipfile = nullptr;
@@ -421,8 +476,11 @@ void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarf
         for (i = 0; i < global_info.number_entry; ++i)
         {
             // Run in caller thread
-            runInCallerThread([i, total, progress](){
-                progress(i, total);
+            runInCallerThread([this, srcDir, zipName, i, total](){
+                if(this->unZipFileProgressCallback)
+                {
+                    this->unZipFileProgressCallback(srcDir + ',' + zipName, i, total);
+                }
             });
             // Get info about current file.
             ret = unzGetCurrentFileInfo(zipfile, &fileInfo, fileName, MAX_FILENAME, nullptr, 0, nullptr, 0);
@@ -545,8 +603,11 @@ void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarf
             if ((i + 1) < global_info.number_entry)
             {
                 // Run in caller thread
-                runInCallerThread([i, total, progress](){
-                    progress(i+1, total);
+                runInCallerThread([this, srcDir, zipName, i, total](){
+                    if(this->unZipFileProgressCallback)
+                    {
+                        this->unZipFileProgressCallback(srcDir + ',' + zipName, i + 1, total);
+                    }
                 });
                 if (unzGoToNextFile(zipfile) != UNZ_OK)
                 {
@@ -560,8 +621,11 @@ void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarf
         
         CC_BREAK_IF(isBreak1);
 
-        runInCallerThread([total, progress](){
-            progress(total, total);
+        runInCallerThread([this, srcDir, zipName, total](){
+            if(this->unZipFileProgressCallback)
+            {
+                this->unZipFileProgressCallback(srcDir + ',' + zipName, total, total);
+            }
         });
         result = true;
         message = "Uncompressing success.";
@@ -572,8 +636,11 @@ void MZipUtils::unZipFileSync(const std::string &srcDir, const std::string &tarf
     {
         unzClose(zipfile);
     }
-    runInCallerThread([complete, result, message](){
-        complete(result, message);
+    runInCallerThread([this, srcDir, zipName, result, message](){
+        if(this->unZipFileCompleteCallback)
+        {
+            this->unZipFileCompleteCallback(srcDir + ',' + zipName, result, message);
+        }
     });
 }
 
@@ -1009,125 +1076,138 @@ string MD5::toString() {
 }
 
 ```
-* 修改引擎代码，在cocos2d-x/cocos/platform/CCFileUtils.h中添加以下代码
+* 修改引擎代码，在cocos2d-x/cocos/cocos2d.h中修改及添加以下代码
 ``` c++
+#include "platform/CCFileUtils.h"
 #include "platform/CCZipUtils.h"
-class CC_DLL FileUtils
-{
-public:
-    /**
-     * 解压文件到指定目录
-     * 压缩包内的内容会直接解压到目标解压地址中
-     * @param srcDir 源文件地址
-     * @param tarfullpath 目标解压地址
-     * @param zipName 压缩文件名
-     * @param progress 过程回调函数
-     * @param complete 完成回调函数
-     */
-    virtual void unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback& progress, const FinishCallback& complete);
-    
-    /**
-     * 计算文件md5值
-     * @param filePath 文件地址
-     * @param complete 完成回调函数
-     */
-    virtual void calFileMD5(const std::string &filePath, const FinishCallback& complete);
-protected:
-    /**
-     * 压缩工具单例
-     */
-    MZipUtils* s_shatedZipUtils;
-}
-```
-* 修改引擎代码，在cocos2d-x/cocos/platform/CCFileUtils.cpp中修改及添加以下代码
-``` c++
-FileUtils::FileUtils()
-    : _writablePath("")
-{
-    s_shatedZipUtils = MZipUtils::getInstance();
-}
-
-FileUtils::~FileUtils()
-{
-    s_shatedZipUtils = nullptr;
-    MZipUtils::destroyInstance();
-}
-
-void FileUtils::unZipFile(const std::string &srcDir, const std::string &tarfullpath, const std::string &zipName, const ProgressCallback& progress, const FinishCallback& complete)
-{
-    this->s_shatedZipUtils->unZipFile(srcDir, tarfullpath, zipName, progress, complete);
-}
-
-void FileUtils::calFileMD5(const std::string &filePath, const FinishCallback& complete)
-{
-    this->s_shatedZipUtils->calFileMD5(filePath, complete);
-}
 ```
 * 修改引擎代码，在cocos2d-x/cocos/scripting/jsb-bindings/auto/api/jsb_cocos2dx_auto_api.js中添加JSB自动绑定代码
 ``` js
 /**
- * @method calFileMD5
- * @param {String} arg0
- * @param {function} arg1
+ * @class MZipUtils
  */
-calFileMD5 : function (
-str, 
+jsb.MZipUtils = {
+
+/**
+ * @method setUnZipFileCompleteCallback
+ * @param {function} arg0
+ */
+setUnZipFileCompleteCallback : function (
 func 
 )
 {
 },
+
+/**
+ * @method calFileMD5
+ * @param {String} arg0
+ */
+calFileMD5 : function (
+str 
+)
+{
+},
+
+/**
+ * @method setCalFileMD5Callback
+ * @param {function} arg0
+ */
+setCalFileMD5Callback : function (
+func 
+)
+{
+},
+
+/**
+ * @method setUnZipFileProgressCallback
+ * @param {function} arg0
+ */
+setUnZipFileProgressCallback : function (
+func 
+)
+{
+},
+
 /**
  * @method unZipFile
  * @param {String} arg0
  * @param {String} arg1
  * @param {String} arg2
- * @param {function} arg3
- * @param {function} arg4
  */
 unZipFile : function (
 str, 
 str, 
-str, 
-func, 
-func 
+str 
 )
 {
 },
 
+/**
+ * @method destroyInstance
+ */
+destroyInstance : function (
+)
+{
+},
+
+/**
+ * @method getInstance
+ * @return {cc.MZipUtils}
+ */
+getInstance : function (
+)
+{
+    return cc.MZipUtils;
+},
+
+};
+
 ```
 * 修改引擎代码，在cocos2d-x/cocos/scripting/jsb-bindings/auto/jsb_cocos2dx_auto.hpp中添加JSB自动绑定代码
 ``` c++
-SE_DECLARE_FUNC(js_engine_FileUtils_calFileMD5);
-SE_DECLARE_FUNC(js_engine_FileUtils_unZipFile);
+extern se::Object* __jsb_cocos2d_MZipUtils_proto;
+extern se::Class* __jsb_cocos2d_MZipUtils_class;
+
+bool js_register_cocos2d_MZipUtils(se::Object* obj);
+bool register_all_engine(se::Object* obj);
+SE_DECLARE_FUNC(js_engine_MZipUtils_setUnZipFileCompleteCallback);
+SE_DECLARE_FUNC(js_engine_MZipUtils_calFileMD5);
+SE_DECLARE_FUNC(js_engine_MZipUtils_setCalFileMD5Callback);
+SE_DECLARE_FUNC(js_engine_MZipUtils_setUnZipFileProgressCallback);
+SE_DECLARE_FUNC(js_engine_MZipUtils_unZipFile);
+SE_DECLARE_FUNC(js_engine_MZipUtils_destroyInstance);
+SE_DECLARE_FUNC(js_engine_MZipUtils_getInstance);
 ```
 * 修改引擎代码，在cocos2d-x/cocos/scripting/jsb-bindings/auto/jsb_cocos2dx_auto.cpp中添加JSB自动绑定代码
 ``` c++
-static bool js_engine_FileUtils_calFileMD5(se::State& s)
+se::Object* __jsb_cocos2d_MZipUtils_proto = nullptr;
+se::Class* __jsb_cocos2d_MZipUtils_class = nullptr;
+
+static bool js_engine_MZipUtils_setUnZipFileCompleteCallback(se::State& s)
 {
-    cocos2d::FileUtils* cobj = (cocos2d::FileUtils*)s.nativeThisObject();
-    SE_PRECONDITION2(cobj, false, "js_engine_FileUtils_calFileMD5 : Invalid Native Object");
+    cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+    SE_PRECONDITION2(cobj, false, "js_engine_MZipUtils_setUnZipFileCompleteCallback : Invalid Native Object");
     const auto& args = s.args();
     size_t argc = args.size();
     CC_UNUSED bool ok = true;
-    if (argc == 2) {
-        std::string arg0;
-        std::function<void (bool, std::string)> arg1;
-        ok &= seval_to_std_string(args[0], &arg0);
+    if (argc == 1) {
+        std::function<void (std::string, bool, std::string)> arg0;
         do {
-            if (args[1].isObject() && args[1].toObject()->isFunction())
+            if (args[0].isObject() && args[0].toObject()->isFunction())
             {
                 se::Value jsThis(s.thisObject());
-                se::Value jsFunc(args[1]);
-                jsFunc.toObject()->root();
-                auto lambda = [=](bool larg0, std::string larg1) -> void {
+                se::Value jsFunc(args[0]);
+                jsThis.toObject()->attachObject(jsFunc.toObject());
+                auto lambda = [=](std::string larg0, bool larg1, std::string larg2) -> void {
                     se::ScriptEngine::getInstance()->clearException();
                     se::AutoHandleScope hs;
         
                     CC_UNUSED bool ok = true;
                     se::ValueArray args;
-                    args.resize(2);
-                    ok &= boolean_to_seval(larg0, &args[0]);
-                    ok &= std_string_to_seval(larg1, &args[1]);
+                    args.resize(3);
+                    ok &= std_string_to_seval(larg0, &args[0]);
+                    ok &= boolean_to_seval(larg1, &args[1]);
+                    ok &= std_string_to_seval(larg2, &args[2]);
                     se::Value rval;
                     se::Object* thisObj = jsThis.isObject() ? jsThis.toObject() : nullptr;
                     se::Object* funcObj = jsFunc.toObject();
@@ -1136,115 +1216,233 @@ static bool js_engine_FileUtils_calFileMD5(se::State& s)
                         se::ScriptEngine::getInstance()->clearException();
                     }
                 };
-                arg1 = lambda;
+                arg0 = lambda;
             }
             else
             {
-                arg1 = nullptr;
+                arg0 = nullptr;
             }
         } while(false)
         ;
-        SE_PRECONDITION2(ok, false, "js_engine_FileUtils_calFileMD5 : Error processing arguments");
-        cobj->calFileMD5(arg0, arg1);
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_setUnZipFileCompleteCallback : Error processing arguments");
+        cobj->setUnZipFileCompleteCallback(arg0);
         return true;
     }
-    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 2);
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
     return false;
 }
-SE_BIND_FUNC(js_engine_FileUtils_calFileMD5)
+SE_BIND_FUNC(js_engine_MZipUtils_setUnZipFileCompleteCallback)
 
-static bool js_engine_FileUtils_unZipFile(se::State& s)
+static bool js_engine_MZipUtils_calFileMD5(se::State& s)
 {
-    cocos2d::FileUtils* cobj = (cocos2d::FileUtils*)s.nativeThisObject();
-    SE_PRECONDITION2(cobj, false, "js_engine_FileUtils_unZipFile : Invalid Native Object");
+    cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+    SE_PRECONDITION2(cobj, false, "js_engine_MZipUtils_calFileMD5 : Invalid Native Object");
     const auto& args = s.args();
     size_t argc = args.size();
     CC_UNUSED bool ok = true;
-    if (argc == 5) {
+    if (argc == 1) {
+        std::string arg0;
+        ok &= seval_to_std_string(args[0], &arg0);
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_calFileMD5 : Error processing arguments");
+        cobj->calFileMD5(arg0);
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+    return false;
+}
+SE_BIND_FUNC(js_engine_MZipUtils_calFileMD5)
+
+static bool js_engine_MZipUtils_setCalFileMD5Callback(se::State& s)
+{
+    cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+    SE_PRECONDITION2(cobj, false, "js_engine_MZipUtils_setCalFileMD5Callback : Invalid Native Object");
+    const auto& args = s.args();
+    size_t argc = args.size();
+    CC_UNUSED bool ok = true;
+    if (argc == 1) {
+        std::function<void (std::string, bool, std::string)> arg0;
+        do {
+            if (args[0].isObject() && args[0].toObject()->isFunction())
+            {
+                se::Value jsThis(s.thisObject());
+                se::Value jsFunc(args[0]);
+                jsThis.toObject()->attachObject(jsFunc.toObject());
+                auto lambda = [=](std::string larg0, bool larg1, std::string larg2) -> void {
+                    se::ScriptEngine::getInstance()->clearException();
+                    se::AutoHandleScope hs;
+        
+                    CC_UNUSED bool ok = true;
+                    se::ValueArray args;
+                    args.resize(3);
+                    ok &= std_string_to_seval(larg0, &args[0]);
+                    ok &= boolean_to_seval(larg1, &args[1]);
+                    ok &= std_string_to_seval(larg2, &args[2]);
+                    se::Value rval;
+                    se::Object* thisObj = jsThis.isObject() ? jsThis.toObject() : nullptr;
+                    se::Object* funcObj = jsFunc.toObject();
+                    bool succeed = funcObj->call(args, thisObj, &rval);
+                    if (!succeed) {
+                        se::ScriptEngine::getInstance()->clearException();
+                    }
+                };
+                arg0 = lambda;
+            }
+            else
+            {
+                arg0 = nullptr;
+            }
+        } while(false)
+        ;
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_setCalFileMD5Callback : Error processing arguments");
+        cobj->setCalFileMD5Callback(arg0);
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+    return false;
+}
+SE_BIND_FUNC(js_engine_MZipUtils_setCalFileMD5Callback)
+
+static bool js_engine_MZipUtils_setUnZipFileProgressCallback(se::State& s)
+{
+    cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+    SE_PRECONDITION2(cobj, false, "js_engine_MZipUtils_setUnZipFileProgressCallback : Invalid Native Object");
+    const auto& args = s.args();
+    size_t argc = args.size();
+    CC_UNUSED bool ok = true;
+    if (argc == 1) {
+        std::function<void (std::string, long, long)> arg0;
+        do {
+            if (args[0].isObject() && args[0].toObject()->isFunction())
+            {
+                se::Value jsThis(s.thisObject());
+                se::Value jsFunc(args[0]);
+                jsThis.toObject()->attachObject(jsFunc.toObject());
+                auto lambda = [=](std::string larg0, long larg1, long larg2) -> void {
+                    se::ScriptEngine::getInstance()->clearException();
+                    se::AutoHandleScope hs;
+        
+                    CC_UNUSED bool ok = true;
+                    se::ValueArray args;
+                    args.resize(3);
+                    ok &= std_string_to_seval(larg0, &args[0]);
+                    ok &= long_to_seval(larg1, &args[1]);
+                    ok &= long_to_seval(larg2, &args[2]);
+                    se::Value rval;
+                    se::Object* thisObj = jsThis.isObject() ? jsThis.toObject() : nullptr;
+                    se::Object* funcObj = jsFunc.toObject();
+                    bool succeed = funcObj->call(args, thisObj, &rval);
+                    if (!succeed) {
+                        se::ScriptEngine::getInstance()->clearException();
+                    }
+                };
+                arg0 = lambda;
+            }
+            else
+            {
+                arg0 = nullptr;
+            }
+        } while(false)
+        ;
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_setUnZipFileProgressCallback : Error processing arguments");
+        cobj->setUnZipFileProgressCallback(arg0);
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+    return false;
+}
+SE_BIND_FUNC(js_engine_MZipUtils_setUnZipFileProgressCallback)
+
+static bool js_engine_MZipUtils_unZipFile(se::State& s)
+{
+    cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+    SE_PRECONDITION2(cobj, false, "js_engine_MZipUtils_unZipFile : Invalid Native Object");
+    const auto& args = s.args();
+    size_t argc = args.size();
+    CC_UNUSED bool ok = true;
+    if (argc == 3) {
         std::string arg0;
         std::string arg1;
         std::string arg2;
-        std::function<void (long, long)> arg3;
-        std::function<void (bool, std::string)> arg4;
         ok &= seval_to_std_string(args[0], &arg0);
         ok &= seval_to_std_string(args[1], &arg1);
         ok &= seval_to_std_string(args[2], &arg2);
-        do {
-            if (args[3].isObject() && args[3].toObject()->isFunction())
-            {
-                se::Value jsThis(s.thisObject());
-                se::Value jsFunc(args[3]);
-                jsFunc.toObject()->root();
-                auto lambda = [=](long larg0, long larg1) -> void {
-                    se::ScriptEngine::getInstance()->clearException();
-                    se::AutoHandleScope hs;
-        
-                    CC_UNUSED bool ok = true;
-                    se::ValueArray args;
-                    args.resize(2);
-                    ok &= long_to_seval(larg0, &args[0]);
-                    ok &= long_to_seval(larg1, &args[1]);
-                    se::Value rval;
-                    se::Object* thisObj = jsThis.isObject() ? jsThis.toObject() : nullptr;
-                    se::Object* funcObj = jsFunc.toObject();
-                    bool succeed = funcObj->call(args, thisObj, &rval);
-                    if (!succeed) {
-                        se::ScriptEngine::getInstance()->clearException();
-                    }
-                };
-                arg3 = lambda;
-            }
-            else
-            {
-                arg3 = nullptr;
-            }
-        } while(false)
-        ;
-        do {
-            if (args[4].isObject() && args[4].toObject()->isFunction())
-            {
-                se::Value jsThis(s.thisObject());
-                se::Value jsFunc(args[4]);
-                jsFunc.toObject()->root();
-                auto lambda = [=](bool larg0, std::string larg1) -> void {
-                    se::ScriptEngine::getInstance()->clearException();
-                    se::AutoHandleScope hs;
-        
-                    CC_UNUSED bool ok = true;
-                    se::ValueArray args;
-                    args.resize(2);
-                    ok &= boolean_to_seval(larg0, &args[0]);
-                    ok &= std_string_to_seval(larg1, &args[1]);
-                    se::Value rval;
-                    se::Object* thisObj = jsThis.isObject() ? jsThis.toObject() : nullptr;
-                    se::Object* funcObj = jsFunc.toObject();
-                    bool succeed = funcObj->call(args, thisObj, &rval);
-                    if (!succeed) {
-                        se::ScriptEngine::getInstance()->clearException();
-                    }
-                };
-                arg4 = lambda;
-            }
-            else
-            {
-                arg4 = nullptr;
-            }
-        } while(false)
-        ;
-        SE_PRECONDITION2(ok, false, "js_engine_FileUtils_unZipFile : Error processing arguments");
-        cobj->unZipFile(arg0, arg1, arg2, arg3, arg4);
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_unZipFile : Error processing arguments");
+        cobj->unZipFile(arg0, arg1, arg2);
         return true;
     }
-    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 5);
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 3);
     return false;
 }
-SE_BIND_FUNC(js_engine_FileUtils_unZipFile)
+SE_BIND_FUNC(js_engine_MZipUtils_unZipFile)
 
-bool js_register_engine_FileUtils(se::Object* obj)
+static bool js_engine_MZipUtils_destroyInstance(se::State& s)
 {
-    cls->defineFunction("calFileMD5", _SE(js_engine_FileUtils_calFileMD5));
-    cls->defineFunction("unZipFile", _SE(js_engine_FileUtils_unZipFile));
+    const auto& args = s.args();
+    size_t argc = args.size();
+    if (argc == 0) {
+        cocos2d::MZipUtils::destroyInstance();
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 0);
+    return false;
 }
+SE_BIND_FUNC(js_engine_MZipUtils_destroyInstance)
+
+static bool js_engine_MZipUtils_getInstance(se::State& s)
+{
+    const auto& args = s.args();
+    size_t argc = args.size();
+    CC_UNUSED bool ok = true;
+    if (argc == 0) {
+        cocos2d::MZipUtils* result = cocos2d::MZipUtils::getInstance();
+        ok &= native_ptr_to_seval<cocos2d::MZipUtils>((cocos2d::MZipUtils*)result, &s.rval());
+        SE_PRECONDITION2(ok, false, "js_engine_MZipUtils_getInstance : Error processing arguments");
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 0);
+    return false;
+}
+SE_BIND_FUNC(js_engine_MZipUtils_getInstance)
+
+
+
+static bool js_cocos2d_MZipUtils_finalize(se::State& s)
+{
+    CCLOGINFO("jsbindings: finalizing JS object %p (cocos2d::MZipUtils)", s.nativeThisObject());
+    auto iter = se::NonRefNativePtrCreatedByCtorMap::find(s.nativeThisObject());
+    if (iter != se::NonRefNativePtrCreatedByCtorMap::end())
+    {
+        se::NonRefNativePtrCreatedByCtorMap::erase(iter);
+        cocos2d::MZipUtils* cobj = (cocos2d::MZipUtils*)s.nativeThisObject();
+        delete cobj;
+    }
+    return true;
+}
+SE_BIND_FINALIZE_FUNC(js_cocos2d_MZipUtils_finalize)
+
+bool js_register_engine_MZipUtils(se::Object* obj)
+{
+    auto cls = se::Class::create("MZipUtils", obj, nullptr, nullptr);
+
+    cls->defineFunction("setUnZipFileCompleteCallback", _SE(js_engine_MZipUtils_setUnZipFileCompleteCallback));
+    cls->defineFunction("calFileMD5", _SE(js_engine_MZipUtils_calFileMD5));
+    cls->defineFunction("setCalFileMD5Callback", _SE(js_engine_MZipUtils_setCalFileMD5Callback));
+    cls->defineFunction("setUnZipFileProgressCallback", _SE(js_engine_MZipUtils_setUnZipFileProgressCallback));
+    cls->defineFunction("unZipFile", _SE(js_engine_MZipUtils_unZipFile));
+    cls->defineStaticFunction("destroyInstance", _SE(js_engine_MZipUtils_destroyInstance));
+    cls->defineStaticFunction("getInstance", _SE(js_engine_MZipUtils_getInstance));
+    cls->defineFinalizeFunction(_SE(js_cocos2d_MZipUtils_finalize));
+    cls->install();
+    JSBClassType::registerClass<cocos2d::MZipUtils>(cls);
+
+    __jsb_cocos2d_MZipUtils_proto = cls->getProto();
+    __jsb_cocos2d_MZipUtils_class = cls;
+
+    se::ScriptEngine::getInstance()->clearException();
+    return true;
+}
+
+js_register_engine_MZipUtils(ns);
 ```
 * 修改引擎代码，在cocos2d-x/build/libcocos2d.vcxproj中添加以下代码
 ``` xml

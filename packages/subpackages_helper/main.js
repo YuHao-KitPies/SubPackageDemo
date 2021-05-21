@@ -406,7 +406,7 @@ function onBuildFinished(options, callback) {
     for (var item in subpackagesInfo) {
       let data = {};
       data.settings = subpackagesInfo[item].assets || {};
-      subpackagesInfo[item].stamp = computedContentHex(JSON.stringify(subpackagesInfo[item].fUUIDs)).substring(0, 5);
+      subpackagesInfo[item].stamp = computedContentHex(JSON.stringify(subpackagesInfo[item].fUUIDs) + new Date().toLocaleString()).substring(0, 5);
       data.subpackages = {};
       data.subpackages[item] = {
         name: subpackagesInfo[item].name,
